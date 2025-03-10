@@ -1,10 +1,10 @@
-# Climate allows sugar maple to germinate north of its range with limited seedling growth 
+# Climate allows sugar maple to germinate north of its range with limited seedling growth constraints
 
 This repository contains the R code and data to retrieve the results and graphs from the "doi here" study. We aimed to determine whether temperature and frost events limits the germination and growth of sugar maple (_Acer saccharum_ Marshall) seedlings, an emblematic temperate tree species, beyond its northern range limit using transplantation experiment.
 
 ## Citation 
 
-Soubeyrand M., Beekharry A., Brice M-H., Gennaretti F., Grondin P., Bergeron Y. (202x). Climate allows sugar maple to germinate north of its range with limited seedling growth . *Submitted in Journal of Vegetation Science*
+Soubeyrand M., Beekharry A., Brice M-H., Gennaretti F., Grondin P., Bergeron Y. (2025). Climate allows sugar maple to germinate north of its range with limited seedling growth . *Submitted in Journal of Vegetation Science*
 
 Please cite this article for any work that re-uses this code.
 
