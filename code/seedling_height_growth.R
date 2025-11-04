@@ -1,6 +1,8 @@
+#Script that model the height growth
+
 rm(list=ls())
 
-setwd("~/postdoc/germination/github")
+setwd("~/postdoc/germination/code")
 
 library(tidyverse)
 theme_set(theme_bw())
@@ -10,22 +12,53 @@ library(lmerTest)
 library(MuMIn)
 library(ggpubr)
 library(AICcmodavg)
+library(ggeffects)
 
-#Les données de croissance
-height <- read_excel("data/height.xlsx")
+#Growth data
+height <- read_excel("~/postdoc/germination/github/data/height.xlsx")
 
 head(height)
 
-#Growth data
-growth <- height %>% 
+#Manipulation to have 0 cm growth when cold injuries.
+height_mort_cold <- height %>% 
   pivot_longer(cols=c(`HT 2005`, `HT 2006`, `HT 2007`), 
-               names_to="year", values_to = "height_note") %>% 
-  mutate(height=ifelse(grepl("[a-zA-Z]", height_note), NA, height_note),
-         height=as.numeric(height),
-         year=gsub("HT ", "", year)) %>% 
-  arrange(site, block, light ,seedling_ID, year) %>%
+               names_to="year", values_to = "height") %>% 
+  mutate(year=gsub("HT ", "", year)) %>% 
+  mutate(height2=case_when(height=="c"~"cold injury",
+                           height=="d"~"dead",
+                           height=="m"~"dead",
+                           .default = height)) %>% 
+  group_by(site, seedling_ID, light, block) %>% 
+  mutate(height3=case_when(height2=="cold injury"~lag(height2),
+                           .default = height2)) %>%
+  mutate(height3 = case_when(
+    height2 == "cold injury" & any(height2 != "cold injury") ~ lag(height2),
+    height2 == "cold injury" & all(height2 == "cold injury") ~ NA_character_, 
+    TRUE ~ height2
+  )) %>%
+  # propager "dead" aux années suivantes, en vérifiant NA
+  mutate(height3 = {
+    h <- height3
+    for(i in 2:length(h)) {
+      if(!is.na(h[i-1]) && h[i-1] == "dead") h[i] <- "dead"
+    }
+    h
+  }) %>%
+  mutate(height3 = case_when(
+    height3 == "cold injury" & any(height3 != "cold injury") ~ lag(height3), 
+    TRUE ~ height3
+  )) %>%
+  mutate(height4 = case_when(
+    height3 == "dead" ~ NA_character_, 
+    TRUE ~ height3)) %>% 
+  dplyr::select(site, seedling_ID, light, block, year, mort_cold=height2, height=height4) %>%
+  na.omit() 
+
+#Growth calcul
+
+growth <- height_mort_cold %>% 
   group_by(site, seedling_ID, block, light) %>% 
-  mutate(growth=height-lag(height),
+  mutate(growth=as.numeric(height)-lag(as.numeric(height)),
          growth=case_when(year=="2006"~growth/2,
                           year=="2007"~growth)) %>% 
   na.omit()
@@ -34,7 +67,7 @@ growth <- height %>%
 growth$site <- factor(growth$site, levels = c("KIP", "KEK", "MON", "HED", "MUS"))
 
 #Climate data
-clim <- readRDS("data/clim_growth.rds") %>% 
+clim <- readRDS("~/postdoc/germination/github/data/clim_growth.rds") %>% 
   mutate(year=as.character(year)) %>% 
   rename(nb_late_frost_event=n_frost)
 
@@ -43,50 +76,77 @@ growth <- growth %>%
   left_join(clim, by = join_by(site, year)) %>% 
   na.omit() %>% 
   mutate(seedling_ID=paste(site, seedling_ID, light, block, sep="_")) %>% 
-  mutate(site_block=paste0(site, "_", block))
+  mutate(site_block=paste0(site, "_", block)) %>% 
+  mutate(height=as.numeric(height))
+
+growth$light  <- case_when(
+  growth$light  == "SH-1" ~ "Open-canopy",
+  growth$light  == "SH-2" ~ "Intermediate",
+  growth$light == "SH-3" ~ "Dense-canopy")
+growth$light  <- factor(growth$light, levels = c("Dense-canopy", "Intermediate", "Open-canopy"))
 
 #Random effect model selection
-mod_re1 <- lmer(log(growth+1)~ height + light + temperature + nb_late_frost_event + 
+mod_re1 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) + scale(nb_late_frost_event) + scale(precipitation) +
                 (1 | site/block) + (1 | seedling_ID) + (1 | year), data=growth)
 
-mod_re2 <- lmer(log(growth+1)~ height + light + temperature + nb_late_frost_event + 
+mod_re2 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) + scale(nb_late_frost_event) + scale(precipitation) + 
                   (1 | site/block) + (1 | seedling_ID), data=growth)
 
-mod_re3 <- lmer(log(growth+1)~ height + light + temperature + nb_late_frost_event + 
+mod_re3 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) + scale(nb_late_frost_event) + scale(precipitation) + 
                   (1 | site/block) , data=growth)
 
-mod_re4 <- lm(log(growth+1)~ height + light + temperature + nb_late_frost_event, data=growth)
+mod_re4 <- lm(log(growth+1)~ scale(height) + light + 
+                scale(temperature) + scale(nb_late_frost_event) + scale(precipitation) , data=growth)
 
 AIC_re <- data.frame(mod=1:4, AIC=c(AIC(mod_re1), AIC(mod_re2), AIC(mod_re3), AIC(mod_re4)))
 AIC_re
 
-#Marginal effect model selection
-mod_me1 <- lmer(log(growth+1)~ height + light + temperature + nb_late_frost_event + 
-                  height:light + height:temperature + light:temperature +
-                  (1 | site/block) + (1 | seedling_ID) + (1 | year), data=growth)
+#Fixed effect model selection
+mod_me1 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) + scale(nb_late_frost_event) + scale(precipitation) +
+                light:scale(height) + light:scale(temperature) + 
+                  light:scale(precipitation) + light:scale(nb_late_frost_event) +
+                  (1 | site/block) + (1 | seedling_ID) , data=growth)
 
-mod_me2 <- lmer(log(growth+1)~ height + light + temperature + nb_late_frost_event + 
-                  height:light + height:temperature + 
-                  (1 | site/block) + (1 | seedling_ID)+ (1 | year), data=growth)
+mod_me2 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) + scale(nb_late_frost_event) + scale(precipitation) +
+                  light:scale(height) + light:scale(temperature) + 
+                  light:scale(precipitation) +
+                  (1 | site/block) + (1 | seedling_ID), data=growth)
 
-mod_me3 <- lmer(log(growth+1)~ height + light + temperature + nb_late_frost_event + 
-                  height:light + 
-                  (1 | site/block) + (1 | seedling_ID)+ (1 | year), data=growth)
+mod_me3 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) + scale(nb_late_frost_event) + scale(precipitation) +
+                light:scale(height) + light:scale(temperature) + 
+                  (1 | site/block) + (1 | seedling_ID), data=growth)
 
-mod_me4 <- lmer(log(growth+1)~ height + light + temperature + nb_late_frost_event +
-                  (1 | site/block) + (1 | seedling_ID)+ (1 | year), data=growth)
+mod_me4 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) + scale(nb_late_frost_event) + scale(precipitation) +
+                  light:scale(height) +
+                  (1 | site/block) + (1 | seedling_ID), data=growth)
 
-mod_me5 <- lmer(log(growth+1)~ height + light + temperature + 
-                  (1 | site/block) + (1 | seedling_ID)+ (1 | year), data=growth)
+mod_me5 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) + scale(precipitation) + scale(nb_late_frost_event) + 
+                  (1 | site/block) + (1 | seedling_ID), data=growth)
 
-mod_me6 <- lmer(log(growth+1)~ height + light + 
-                  (1 | site/block) + (1 | seedling_ID)+ (1 | year), data=growth)
+mod_me6 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) + scale(precipitation) + 
+                  (1 | site/block) + (1 | seedling_ID), data=growth)
 
-mod_me7 <- lmer(log(growth+1)~ height + 
-                  (1 | site/block) + (1 | seedling_ID)+ (1 | year), data=growth)
+mod_me7 <- lmer(log(growth+1)~ scale(height) + light + 
+                  scale(temperature) +
+                  (1 | site/block) + (1 | seedling_ID), data=growth)
 
-mod_me8 <- lmer(log(growth+1)~ 1 +
-                  (1 | site/block) + (1 | seedling_ID)+ (1 | year), data=growth)
+mod_me8 <- lmer(log(growth+1)~ scale(height) + light +
+                  (1 | site/block) + (1 | seedling_ID), data=growth)
+
+mod_me9 <- lmer(log(growth+1)~ scale(height) +
+                  (1 | site/block) + (1 | seedling_ID), data=growth)
+
+mod_me10 <- lmer(log(growth+1)~ 1 +
+                   (1 | site/block) + (1 | seedling_ID), data=growth)
 
 liste_mod <- list(
   mod_me1 = mod_me1,
@@ -96,162 +156,109 @@ liste_mod <- list(
   mod_me5 = mod_me5,
   mod_me6 = mod_me6,
   mod_me7 = mod_me7,
-  mod_me8 = mod_me8)
-
-
+  mod_me8 = mod_me8,
+  mod_me9 = mod_me9,
+  mod_me10 = mod_me10)
 
 aictab(liste_mod)
 
-model_list <- list(mod_me6, mod_me5, mod_me4)
-
-#Model averaging
-model_avg <- model.avg(model_list, rank = "AICc", revised.var = TRUE)
-
-sel_mod <- model_avg
+sel_mod <- mod_me1
 
 summary(sel_mod)
 
 
 #anova on the model with most effect
-anova(mod_me4)
+anova(sel_mod)
 
-#R²
-r2_models <- data.frame(
-  model = c("mod_me6", "mod_me5", "mod_me4"),
-  R2m = c(r.squaredGLMM(mod_me6)[1], r.squaredGLMM(mod_me5)[1], r.squaredGLMM(mod_me4)[1]),
-  R2c = c(r.squaredGLMM(mod_me6)[2], r.squaredGLMM(mod_me5)[2], r.squaredGLMM(mod_me4)[2]),
-  weight = c(0.53, 0.29, 0.18)  # Poids AICc de chaque modèle
-)
+#Marginal and conditionnal R²
+r2 <- r.squaredGLMM(sel_mod)
+r2
 
-# R² weighted mean
-R2m_avg <- sum(r2_models$R2m * r2_models$weight)
-R2c_avg <- sum(r2_models$R2c * r2_models$weight)
+#Figures 6
+#Figures 6.b precipitation × light
 
-R2m_avg  #Marginal mean R²
-R2c_avg  #Conditionnal mean R²
+gge_precip <- ggpredict(sel_mod, terms = c("precipitation [all]", "light"))
 
-#Figures
-#Temperature
-new_data <- expand.grid(height=mean(growth$height), 
-            nb_late_frost_event= mean(growth$nb_late_frost_event),
-            light=c("SH-1", "SH-2", "SH-3"),
-            temperature=seq(min(growth$temperature), max(growth$temperature), length.out = 100))
-
-predicted_values <- predict(sel_mod, newdata = new_data, re.form = NA, se=T)
-
-d <- bind_cols(new_data, pred=predicted_values$fit,
-               pred_min=predicted_values$fit-predicted_values$se.fit, 
-               pred_max=predicted_values$fit+predicted_values$se.fit) %>% 
-  rename(`Light level`=light)
-
-
-d$`Light level` <- case_when(
-  d$`Light level` == "SH-1" ~ "100%",
-  d$`Light level` == "SH-2" ~ "30%",
-  d$`Light level` == "SH-3" ~ "10%")
-d$`Light level` <- factor(d$`Light level`, levels = c("10%", "30%", "100%"))
-
-temp <- ggplot(d, aes(x=temperature,
-              y= exp(pred)+1,
-              ymin=exp(pred_min)+1,
-              ymax=exp(pred_max)+1,
-              color=`Light level`, fill=`Light level`)) + 
-  geom_ribbon(alpha=0.5, color=NA) +
-  geom_line(linewidth=1) +
-  ylab("Height growth (cm.year⁻¹)") + 
-  xlab("Temperature (°C)")+ 
-  ylim(0,100)+ 
+p_precip <- ggplot(gge_precip, aes(x = x, y = predicted, color = group, fill = group)) +
+  geom_line(size = 1) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2, color = NA) +
+  labs(
+    x = "Precipitation (in mm)",
+    y = NULL,
+    color = "Light treatment",
+    fill = "Light treatment"
+  ) +
+  theme_minimal()+ 
   theme(strip.text.x = element_text(size = 12),
-        axis.text=element_text(size=9),
-        axis.title=element_text(size=10),
-        legend.title = element_text(size = 12),
-        legend.text = element_text(size=12))
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14),
+        legend.title = element_text(size = 14),
+        legend.text = element_text(size=12),
+        legend.position = "bottom",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background  = element_rect(fill = "white", color = NA))
 
+#Figures 6.a temperature × light
+gge_temp <- ggpredict(sel_mod, terms = c("temperature [all]", "light"))
 
-#Height
-new_data <- expand.grid(height=seq(min(growth$height), max(growth$height), length.out = 100), 
-                        nb_late_frost_event= mean(growth$nb_late_frost_event),
-                        light=c("SH-1", "SH-2", "SH-3"),
-                        temperature=mean(growth$temperature))
-
-predicted_values <- predict(sel_mod, newdata = new_data, re.form = NA, se=T)
-
-d <- bind_cols(new_data, pred=predicted_values$fit,
-               pred_min=predicted_values$fit-predicted_values$se.fit, 
-               pred_max=predicted_values$fit+predicted_values$se.fit)%>% 
-  rename(`Light level`=light)
-
-d$`Light level` <- case_when(
-  d$`Light level` == "SH-1" ~ "100%",
-  d$`Light level` == "SH-2" ~ "30%",
-  d$`Light level` == "SH-3" ~ "10%")
-d$`Light level` <- factor(d$`Light level`, levels = c("10%", "30%", "100%"))
-
-height <- ggplot(d, aes(x=height,
-              y= exp(pred)+1,
-              ymin=exp(pred_min)+1,
-              ymax=exp(pred_max)+1,
-              color=`Light level`, fill=`Light level`)) + 
-  geom_ribbon(alpha=0.5, color=NA) +
-  geom_line(linewidth=1) +
-  ylab("Height growth (cm.year⁻¹)") + 
-  xlab("Seedling height (in cm)")+ 
-  ylim(0,100)+ 
+p_temp <- ggplot(gge_temp, aes(x = x, y = predicted, color = group, fill = group)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2, color = NA) +
+  labs(
+    x = "Temperature (in °C)",
+    y = "Height growth (cm.year⁻¹)",
+    color = "Light treatment",
+    fill = "Light treatment"
+  ) +
+  theme_minimal()+ 
   theme(strip.text.x = element_text(size = 12),
-        axis.text=element_text(size=9),
-        axis.title=element_text(size=10),
-        legend.title = element_text(size = 12),
-        legend.text = element_text(size=12))
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14),
+        legend.title = element_text(size = 14),
+        legend.text = element_text(size=12),
+        legend.position = "bottom",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background  = element_rect(fill = "white", color = NA))
 
+#Figures 6.c late frost events × light
+gge_frost <- ggpredict(sel_mod, terms = c("nb_late_frost_event [all]", "light"))
 
-#Number of frost day
-new_data <- expand.grid(height=mean(growth$height), 
-                        nb_late_frost_event= seq(min(growth$nb_late_frost_event), max(growth$nb_late_frost_event), length.out = 100),
-                        light=c("SH-1", "SH-2", "SH-3"),
-                        temperature=mean(growth$temperature))
-
-predicted_values <- predict(sel_mod, newdata = new_data, re.form = NA, se=T)
-
-d <- bind_cols(new_data, pred=predicted_values$fit,
-               pred_min=predicted_values$fit-predicted_values$se.fit, 
-               pred_max=predicted_values$fit+predicted_values$se.fit)%>% 
-  rename(`Light level`=light)
-
-d$`Light level` <- case_when(
-  d$`Light level` == "SH-1" ~ "100%",
-  d$`Light level` == "SH-2" ~ "30%",
-  d$`Light level` == "SH-3" ~ "10%")
-d$`Light level` <- factor(d$`Light level`, levels = c("10%", "30%", "100%"))
-
-frost_day <- ggplot(d, aes(x=nb_late_frost_event,
-              y= exp(pred)+1,
-              ymin=exp(pred_min)+1,
-              ymax=exp(pred_max)+1,
-              color=`Light level`, fill=`Light level`)) + 
-  geom_ribbon(alpha=0.5, color=NA) +
-  geom_line(linewidth=1) +
-  ylab("Height growth (cm.year⁻¹)") + 
-  xlab("# of frost day")+ 
-  ylim(0,100)+ 
+p_frost <- ggplot(gge_frost, aes(x = x, y = predicted, color = group, fill = group)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2, color = NA) +
+  labs(
+    x = "# late frost events",
+    y = NULL,
+    color = "Light treatment",
+    fill = "Light treatment"
+  ) +
+  theme_minimal()+ 
   theme(strip.text.x = element_text(size = 12),
-        axis.text=element_text(size=9),
-        axis.title=element_text(size=10),
-        legend.title = element_text(size = 12),
-        legend.text = element_text(size=12))
+        axis.text=element_text(size=12),
+        axis.title=element_text(size=14),
+        legend.title = element_text(size = 14),
+        legend.text = element_text(size=12),
+        legend.position = "bottom",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background  = element_rect(fill = "white", color = NA))
 
-plot <- ggarrange(height, temp, frost_day, 
-          common.legend = TRUE, legend="bottom", 
-          labels="AUTO", nrow=1) + 
-  bgcolor("white")+
+clim_height <- ggarrange(
+  p_temp, p_precip, p_frost,
+  ncol = 3, nrow = 1,
+  common.legend = TRUE, legend = "bottom",
+  labels = c("a","b","c"),
+  label.x = c(-0.02, -0.02, -0.04),  
+  label.y = c(1, 1, 1)
+) +
+  bgcolor("white") +
   border("white")
 
-ggsave(plot=plot, filename="figures/growth_height_effect.png", 
-       width=8, height=3)
+ggsave(plot=clim_height, filename="~/postdoc/germination/github/figures/growth_clim_effect.png", 
+       width=8, height=3.5)
 
 
-
-#Height growth differrences between sites
-growth$fitted <-  unname(exp(predict(model_avg, newdata = growth, type = "response")) - 1)
+#Figure 7 Height growth differrences between sites
+growth$fitted <-  unname(exp(predict(sel_mod, newdata = growth, type = "response")) - 1)
 
 site_effect <- growth %>% 
   group_by(site, light) %>% 
@@ -260,17 +267,12 @@ site_effect <- growth %>%
   rename(`Light level` = light)
 
 site_effect$site <- factor(site_effect$site, levels = c("KIP", "KEK", "MON", "HED", "MUS"))
-site_effect$`Light level` <- case_when(
-  site_effect$`Light level` == "SH-1" ~ "100% light level",
-  site_effect$`Light level` == "SH-2" ~ "30% light level",
-  site_effect$`Light level` == "SH-3" ~ "10% light level")
-site_effect$`Light level` <- factor(site_effect$`Light level`, levels = c("10% light level", "30% light level", "100% light level"))
 
 rect_df <- data.frame(xmin = c(0, 2), xmax = c(2, 6),
-                      labs = c("Within", "Outside (North)")) %>% 
-  rename(`Sugar maple range`=labs)
+                      labs = c("within or", "north of the current sugar maple range")) %>% 
+  rename(`Site`=labs)
 
-rect_df$`Sugar maple range` <- factor(rect_df$`Sugar maple range`, levels = c("Within", "Outside (North)"))
+rect_df$`Site` <- factor(rect_df$`Site`, levels = c("within or", "north of the current sugar maple range"))
 
 growth_obs <- growth %>% 
   group_by(site, light) %>% 
@@ -278,16 +280,11 @@ growth_obs <- growth %>%
   rename(`Light level`=light)
 
 growth_obs$site <- factor(growth_obs$site, levels = c("KIP", "KEK", "MON", "HED", "MUS"))
-growth_obs$`Light level` <- case_when(
-  growth_obs$`Light level` == "SH-1" ~ "100% light level",
-  growth_obs$`Light level` == "SH-2" ~ "30% light level",
-  growth_obs$`Light level` == "SH-3" ~ "10% light level")
-growth_obs$`Light level` <- factor(growth_obs$`Light level`, levels = c("10% light level", "30% light level", "100% light level"))
 
 site_plot <- ggplot()+
   geom_rect(data = rect_df, aes(xmin = xmin, xmax = xmax, 
                                 ymin = -Inf, ymax = Inf, 
-                                fill = `Sugar maple range`), 
+                                fill = `Site`), 
             alpha = .3, inherit.aes = FALSE)+
   scale_fill_viridis_d() +
   geom_point(data=site_effect, aes(x=site, y= mean)) +
@@ -299,12 +296,14 @@ site_plot <- ggplot()+
   theme(strip.text.x = element_text(size = 12),
         axis.text=element_text(size=12),
         axis.title=element_text(size=14),
-        legend.title = element_text(size = 14),
+        legend.title = element_text(size = 12),
         legend.text = element_text(size=12),
-        legend.position = "bottom")
+        legend.position = "bottom",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background  = element_rect(fill = "white", color = NA))
 
 site_plot
 
-ggsave(plot=site_plot, filename="figures/growth_site_effect.png", 
+ggsave(plot=site_plot, filename="~/postdoc/germination/github/figures/growth_site_effect.png", 
        width=8, height=4)
 
